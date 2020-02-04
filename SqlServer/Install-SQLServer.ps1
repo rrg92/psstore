@@ -1,3 +1,14 @@
+<#
+	.SYNOPSIS
+		Setup a SQL Server instance
+	
+	.DESCRIPTION
+		This script builds necessary parameters to call some setup.exe of a SQL Server installer.
+		Also, it add some extra help functionality in order to turn setup actions more flexible and fast!
+		
+		Check each parameter help for more details.
+#>
+[CmdletBinding()]
 param(
 
 	#Path to the  directory where setup.exe exists. Can be a path to a mounted is or some extracted directory for example!
@@ -86,13 +97,16 @@ param(
 		[string[]]
 		$SkipRules = @()
 		
-	
+	,#Features to install/uninstalll
+		[ValidateSet("SQLEngine","Replication","FullText")]
+		[string[]]
+		$Features = @("SQLEngine","Replication","FullText")
 		
 	,#Action to do!
 		#Defaults to Install!
 		#Valid actions must be found on documentation.
 		#This script can not support all available actions!
-		[ValidateSet("Install","RebuildDatabase")]
+		[ValidateSet("Install","Uninstall","RebuildDatabase")]
 		$Action = "Install"
 )
 
@@ -118,7 +132,7 @@ $ErrorActionPreference="Stop"
 			
 			#If same user passed and exists cached... get the cached...
 			if($ServiceAccount -is [string]){
-				$CachedServiceUser 	= $Cached_SQLServiceAccount_Install.GetNetworkCredential().UserName;
+				$CachedServiceUser 	= $Cached_SQLServiceAccount_Install.UserName;
 				
 				if($ServiceAccount -eq $CachedServiceUser){
 					$ServiceAccount  = $Cached_SQLServiceAccount_Install
@@ -135,6 +149,8 @@ $ErrorActionPreference="Stop"
 			}
 			
 		}
+		
+
 
 		$ServiceAccountParams = @();
 		if($ServiceAccount){
@@ -170,7 +186,6 @@ $ErrorActionPreference="Stop"
 			$ServiceAccountParams = @{
 				SQLSVCACCOUNT	= "NT AUTHORITY\SYSTEM"
 				AGTSVCACCOUNT 	= "NT AUTHORITY\SYSTEM"
-
 			}
 		}
 
@@ -179,7 +194,7 @@ $ErrorActionPreference="Stop"
 			IACCEPTSQLSERVERLICENSETERMS 	= $null
 			UpdateEnabled 					= $false
 			ERRORREPORTING 					= $false
-			FEATURES 						= "SQLEngine","Replication","FullText"
+			FEATURES 						=  $Features
 			INDICATEPROGRESS 				= $null
 			BROWSERSVCSTARTUPTYPE			= "Automatic"
 			AGTSVCSTARTUPTYPE				= "Automatic"
@@ -263,6 +278,19 @@ $ErrorActionPreference="Stop"
 		return $Params;
 	}
 
+	function ActionUninstall {
+		param($SetupParams)
+		
+
+		$Params = @{
+			ACTION 							= "Uninstall"
+			INSTANCENAME					= $InstanceName
+			FEATURES 						= $Features
+		}
+
+		return $Params;
+	}
+
 
 #Validate log file!
 if(!$LogFile){
@@ -302,8 +330,12 @@ switch($Action){
 		$Params = ActionRebuildDatabase $Params;
 	}
 	
+	"Uninstall" {
+		$Params = ActionUninstall $Params;
+	}
 	
-	else {
+	
+	default {
 		throw "ACTION_NOTSUPPORTED: $Action";
 	}	
 }
@@ -438,3 +470,5 @@ if($Execute){
 	
 	$Params;
 }
+
+
