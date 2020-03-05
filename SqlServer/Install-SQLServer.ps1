@@ -44,7 +44,7 @@ param(
 	
 	,#Path where log setup!
 		#Defaults to current directory, filename format: InstallSQLServer-<InstanceName>.log
-		$LogFile = $null
+		$SetupLogFile = $null
 	
 	,#Specify the product key 
 		$ProductKey = $null
@@ -55,15 +55,43 @@ param(
 	
 	
 	,#Specify the server collation!
-		$ServerCollation  = "Latin1_General_CI_AI"
+		#Specify "auto" to ack that you want know use default collation!
+		$ServerCollation = "Latin1_General_CI_AI"
 	
 	,#Add current user as a adminsitrator!
 		[switch]$AddCurrentAsAdmin = $false
+		
+	,#Sysadmin accounts names!
+		[string[]]$SysAdmins = @()
 	
 	
 	,#Instance directory.
 		#If no specified, uses the default of the installer!
 		$InstanceDir = $null
+		
+	,#Data directory.
+		#If no specified, uses the default of the installer!
+		$DataDir = $null
+		
+	,#Data directory.
+		#If no specified, uses the default of the installer!
+		$LogDir = $null
+		
+	,#Default tempdb directory to data and log!
+		#If no specified, uses the default of the installer!
+		$TempdbDir = $null
+		
+	,#Default tempdb directory to data (overwrites -TempdbDir)
+		#If no specified, uses the default of the installer!
+		$TempdbDataDir = $null
+		
+	,#Default tempdb directory to log (overwrites -TempdbDir)
+		#If no specified, uses the default of the installer!
+		$TempdbLogDir = $null
+		
+	,#Total number of files to create on tempdb!
+		#If no specified, uses the default of the installer!
+		$TempdbFileCount = $null
 	
 	,#Services startup type.
 		#This will set all installed service startup type.
@@ -123,6 +151,19 @@ $ErrorActionPreference="Stop"
 	function ActionInstall {
 		param($SetupParams)
 		
+		$Params = @{
+			ACTION 							= "Install"
+			IACCEPTSQLSERVERLICENSETERMS 	= $null
+			UpdateEnabled 					= $false
+			ERRORREPORTING 					= $false
+			FEATURES 						= $Features
+			INDICATEPROGRESS 				= $null
+			BROWSERSVCSTARTUPTYPE			= "Automatic"
+			AGTSVCSTARTUPTYPE				= "Automatic"
+			SQLCOLLATION					= $ServerCollation
+			INSTANCENAME					= $InstanceName
+		}
+		
 		#Get the cached credentials...
 		if($Cached_SAPassword_Install){
 			$SACredentials  = $Cached_SAPassword_Install
@@ -140,7 +181,7 @@ $ErrorActionPreference="Stop"
 			}
 		}
 
-		if(!$SACredentials){
+		if($SACredentials -eq "auto"){
 			write-host "Provide sa password!"
 			$SACredentials = Get-Credential "sa"
 			
@@ -148,6 +189,8 @@ $ErrorActionPreference="Stop"
 				Set-Variable -Scope 2 -Name Cached_SAPassword_Install -Value $SACredentials
 			}
 			
+			$Params['SAPWD'] 		= $SACredentials.GetNetworkCredential().Password
+			$Params['SECURITYMODE'] = "SQL"
 		}
 		
 
@@ -171,7 +214,7 @@ $ErrorActionPreference="Stop"
 				}
 			}
 
-			$ServiceAccountParams = @{
+			$Params += @{
 				SQLSVCACCOUNT	= $ServiceAccount.GetNetworkCredential().UserName
 				SQLSVCPASSWORD	= $ServiceAccount.GetNetworkCredential().Password
 				AGTSVCACCOUNT	= $ServiceAccount.GetNetworkCredential().UserName
@@ -182,27 +225,9 @@ $ErrorActionPreference="Stop"
 				Set-Variable -Scope 2 -Name Cached_SQLServiceAccount_Install -Value $ServiceAccount
 			}
 
-		} else {
-			$ServiceAccountParams = @{
-				SQLSVCACCOUNT	= "NT AUTHORITY\SYSTEM"
-				AGTSVCACCOUNT 	= "NT AUTHORITY\SYSTEM"
-			}
 		}
 
-		$Params = @{
-			ACTION 							= "Install"
-			IACCEPTSQLSERVERLICENSETERMS 	= $null
-			UpdateEnabled 					= $false
-			ERRORREPORTING 					= $false
-			FEATURES 						=  $Features
-			INDICATEPROGRESS 				= $null
-			BROWSERSVCSTARTUPTYPE			= "Automatic"
-			AGTSVCSTARTUPTYPE				= "Automatic"
-			SAPWD							= $SACredentials.GetNetworkCredential().Password
-			SECURITYMODE					= "SQL"
-			SQLCOLLATION					= $ServerCollation
-			INSTANCENAME					= $InstanceName
-		} + $ServiceAccountParams 
+
 
 		if($SkipRules){
 			$Params["SkipRules"] = $SkipRules -Join " ";
@@ -228,8 +253,18 @@ $ErrorActionPreference="Stop"
 			$Params.add("PID", $ProductKey);
 		}
 
+		$SysAdminAccounts = @()
+		
 		if($AddCurrentAsAdmin){
-			$Params.add("SQLSYSADMINACCOUNTS", [System.Security.Principal.WindowsIdentity]::GetCurrent().Name)
+			$SysAdminAccounts += [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+		}
+		
+		if($SysAdmins){
+			$SysAdminAccounts += $SysAdmins
+		}
+		
+		if($SysAdminAccounts){
+			$Params.add("SQLSYSADMINACCOUNTS", $SysAdminAccounts)
 		}
 
 		if($InstanceDir){
@@ -240,6 +275,37 @@ $ErrorActionPreference="Stop"
 			$Params["SQLSVCSTARTUPTYPE"] = $StartupType
 			$Params["AGTSVCSTARTUPTYPE"] = $StartupType
 			$Params["BROWSERSVCSTARTUPTYPE"] = $StartupType
+		}
+		
+		#user db directories...
+		if($DataDir){
+			$Params['SQLUSERDBDIR'] = $DataDir
+		}
+		
+		if($LogDir){
+			$Params['SQLUSERDBLOGDIR'] = $LogDir
+		}
+		
+		#tempdb configuration
+		if(!$TempdbDataDir -and $TempdbDir){
+			$TempdbDataDir = $TempdbDir
+		}
+		
+		if(!$TempdbLogDir -and $TempdbDir){
+			$TempdbLogDir = $TempdbDir
+		}
+		
+		
+		if($TempdbDataDir){
+			$Params['SQLTEMPDBDIR'] = $TempdbDataDir
+		}
+		
+		if($TempdbLogDir){
+			$Params['SQLTEMPDBLOGDIR'] = $TempdbLogDir
+		}
+		
+		if($TempdbFileCount){
+			$Params['SQLTEMPDBFILECOUNT'] = $TempdbFileCount
 		}
 		
 		return $Params;
@@ -293,8 +359,8 @@ $ErrorActionPreference="Stop"
 
 
 #Validate log file!
-if(!$LogFile){
-	$LogFile = ".\InstallSQLServer-$InstanceName.log"
+if(!$SetupLogFile){
+	$SetupLogFile = ".\InstallSQLServer-$InstanceName.log"
 }
 
 #Valiate setup executable!
@@ -391,18 +457,18 @@ if($Execute){
 	#& $SetupCall > $LogFile 
 	#Start Setup...
 	
-	$LogFile 	 	= ResolvePath $LogFile;
+	$SetupLogFile 	 	= ResolvePath $SetupLogFile;
 	
 	$StartProcessParams = @{
 		FilePath 				= $Setup
 		ArgumentList 			= $SetupArguments
-		RedirectStandardOutput  = $LogFile
+		RedirectStandardOutput  = $SetupLogFile
 	}
 	
 	$SetupProcess = Start-Process @StartProcessParams -PassThru -NoNewWindow
 	$SetupPid = $SetupProcess.Id;
 	
-	write-host "Setup initiated... Pid:$SetupPid LogFile: $LogFile";
+	write-host "Setup initiated... Pid:$SetupPid LogFile: $SetupLogFile";
 	write-host "Waiting finish..."
 	
 	$SetupRuning = $true;
@@ -412,7 +478,7 @@ if($Execute){
 			 $SetupRuning = $false;
 		} catch [System.TimeoutException] {
 			#Do some useful thing
-			$Actions = Get-Content $LogFile | ?{ $_ -match '^Running Action:(.+)' } | %{ $matches[1] };
+			$Actions = Get-Content $SetupLogFile | ?{ $_ -match '^Running Action:(.+)' } | %{ $matches[1] };
 			if($Actions){
 				write-progress -Activity "Installing SQL Server" -Status $Actions[-1];
 			}
@@ -428,7 +494,7 @@ if($Execute){
 
 		$FullErrorMsg = @();
 		$ErrorPartFound = $false;
-		$AllErrorLog = Get-Content $LogFile;
+		$AllErrorLog = Get-Content $SetupLogFile;
 		$l = -1;
 		while($true -and $l -le $AllErrorLog.count){
 			$l++;
