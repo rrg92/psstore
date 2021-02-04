@@ -49,7 +49,11 @@
 			To specify a local accouunt, use MachineName\AccountName
 			
 
+	.EXAMPLE
 		
+		.\Install-SQLServer -AddCurrentAsAdmin  -Setup E:\ -DeveloperEdition -Execute
+		
+			Installs the developer edition.
 #>
 [CmdletBinding()]
 param(
