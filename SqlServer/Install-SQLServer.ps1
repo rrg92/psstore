@@ -6,13 +6,61 @@
 		This script builds necessary parameters to call some setup.exe of a SQL Server installer.
 		Also, it add some extra help functionality in order to turn setup actions more flexible and fast!
 		
-		Check each parameter help for more details.
+		Use Get-Help Install-SqlServer.ps1 -Parameter * to get more detailed help about each parameter.
+		
+	.EXAMPLE
+		
+		.\Install-SQLServer -AddCurrentAsAdmin -LoadProductKey -Setup E:\ -Execute -UseDefaultCollation
+		
+			Installs a default instance, add user running script as sysadmin.
+			Uses the default script collation that is Latin1_General_CI_AI
+			
+	.EXAMPLE
+		
+		.\Install-SQLServer -AddCurrentAsAdmin  -Setup E:\  -ServerCollation  Latin1_General_BIN -Execute	
+		
+		You can use -ServerCollation parameter to specify a non default collation!
+		If you dont specify -UseDefaultCollation scripts throws a error to remeber you to use the correct and desired collation.
+			
+		
+	.EXAMPLE
+		
+		.\Install-SQLServer -AddCurrentAsAdmin  -Setup T:\SqlIso.iso -UseDefaultCollation -Execute
+		
+		In this example we specifu a .iso file for -Setup parameter.
+		The script will try mount the iso and dismount after insllation completes.
+		If any errors on mounting it will report to you and you can tru mount manully and pass the path.
+		Check help of -Setup parameter to see ways to use it.
+		
+		
+	.EXAMPLE
+	
+		.\Install-SQLServer -AddCurrentAsAdmin -ProductKey "0000-1111-2222-33333-44444" -Setup E:\  -Execute
+		
+			You can use -ProductKey parameter to specify a alternate product key.
+			
+	.EXAMPLE
+		
+		.\Install-SQLServer -AddCurrentAsAdmin  -Setup E:\  -ServiceAccount "Domain\UserName"  -Execute
+		
+			You can use -ServiceAccount parameter to specify a service account.
+			Script will ask service account password in first execution time and caches it.
+			if run script again, it will use from this cache and not ask password again).
+			To specify a local accouunt, use MachineName\AccountName
+			
+
+		
 #>
 [CmdletBinding()]
 param(
 
-	#Path to the  directory where setup.exe exists. Can be a path to a mounted is or some extracted directory for example!
-	#You must donwload the ISO.
+	#Path to the  directory where setup.exe exists. 
+	#you can specify a path to a setup.exe in some directory or you can specfy just directory that contains setup.exe
+	#Or, you can specify a path to a .iso file. If specify this, then script will try mount the iso and use setup inside it.
+	#	It thens caches this paths. Subsequent executions dont need specify -Setup because it will use the cache.
+	#
+	#In every case, you must donwload the ISO
+	#The default is use from the environment variable MSSQL_SETUP_FOLDER
 		$Setup = $Env:MSSQL_SETUP_FOLDER
 	
 	,#Execute the install!
@@ -56,7 +104,10 @@ param(
 	
 	,#Specify the server collation!
 		#Specify "auto" to ack that you want know use default collation!
-		$ServerCollation = "Latin1_General_CI_AI"
+		$ServerCollation
+		
+	,#Force script use default script collation	
+		[switch]$UseDefaultCollation
 	
 	,#Add current user as a adminsitrator!
 		[switch]$AddCurrentAsAdmin = $false
@@ -126,9 +177,20 @@ param(
 		$SkipRules = @()
 		
 	,#Features to install/uninstalll
-		[ValidateSet("SQLEngine","Replication","FullText")]
+		[ValidateSet("SQLEngine","Replication","FullText","Conn","BC","IS")]
 		[string[]]
-		$Features = @("SQLEngine","Replication","FullText")
+		$Features = @("SQLEngine","Replication","FullText","Conn")
+		
+	,#Additional Features, in addition to -Features 
+	 #This is useful to add more features in additoon the defaults
+		[ValidateSet("SQLEngine","Replication","FullText","Conn","BC","IS")]
+		[string[]]
+		$AddFeatures = @()
+		
+	,#Exclude features (takes precedence)
+		[ValidateSet("SQLEngine","Replication","FullText","Conn","BC","IS")]
+		[string[]]
+		$ExcludeFeatures = @()
 		
 	,#Action to do!
 		#Defaults to Install!
@@ -136,6 +198,10 @@ param(
 		#This script can not support all available actions!
 		[ValidateSet("Install","Uninstall","RebuildDatabase")]
 		$Action = "Install"
+		
+	,#Force installation of developer edition (useful when using a media containing other editions, like evaluation)
+	 #In order to this works, $ProductKey parameter must be empty
+		[switch]$DeveloperEdition
 )
 
 #Source reference: https://msdn.microsoft.com/en-us/library/ms144259.aspx?f=255&MSPPError=-2147217396
@@ -150,11 +216,10 @@ $ErrorActionPreference="Stop"
 	
 	function ActionInstall {
 		param($SetupParams)
-		
+	
 		$Params = @{
 			ACTION 							= "Install"
 			IACCEPTSQLSERVERLICENSETERMS 	= $null
-			UpdateEnabled 					= $false
 			ERRORREPORTING 					= $false
 			FEATURES 						= $Features
 			INDICATEPROGRESS 				= $null
@@ -162,8 +227,31 @@ $ErrorActionPreference="Stop"
 			AGTSVCSTARTUPTYPE				= "Automatic"
 			SQLCOLLATION					= $ServerCollation
 			INSTANCENAME					= $InstanceName
+		}	
+
+		if($ProductVersion -ge 11){
+			$Params.UpdateEnabled = $false;
 		}
 		
+		
+		#Validate collation!
+		if(!$ServerCollation -and !$UseDefaultCollation){
+			throw "Must specify -ServerCollation. If you want use Latin1_General_CI_AI specify -UseDefaultCollation"
+		}
+		
+		
+		#Validate product key and edition!
+		if($DeveloperEdition -and $ProductKey){
+			
+			if($ProductKey){
+				throw "INVALID_EDITION_OR_PID: Specify -DeveloperEdition or -ProductKey, never both"
+			}
+			
+			#thanks to https://blog.aelterman.com/2017/08/12/silent-installation-of-sql-server-2016-or-2017-developer-edition-from-evaluation-installation-media/
+			$ProductKey = '22222-00000-00000-00000-00000';
+		}
+		
+
 		#Get the cached credentials...
 		if($Cached_SAPassword_Install){
 			$SACredentials  = $Cached_SAPassword_Install
@@ -225,6 +313,15 @@ $ErrorActionPreference="Stop"
 				Set-Variable -Scope 2 -Name Cached_SQLServiceAccount_Install -Value $ServiceAccount
 			}
 
+		} else {
+			#If 2008r2 or less, then add a default less privileged account...
+			#Other versons uses virtual server accoutns by default...
+			if($ProductVersion -lt 11){
+				$Params += @{
+					SQLSVCACCOUNT	= 'NT AUTHORITY\Network Service'
+					AGTSVCACCOUNT	= 'NT AUTHORITY\Network Service'
+				}
+			}
 		}
 
 
@@ -247,6 +344,8 @@ $ErrorActionPreference="Stop"
 			if(!$ProductKey){
 				throw "PRODUCTKEY_NOTFOUND_DEFAULTSETUP: Product key was not found on file $DefaultSetup. Remove parameter -LoadProductKey or use -ProductKey parameter"
 			}
+			
+			write-host "	Loaded ProductKey is:$ProductKey"
 		}
 
 		if($ProductKey){
@@ -357,19 +456,100 @@ $ErrorActionPreference="Stop"
 		return $Params;
 	}
 
+	#Get specific version number from a Product version string from SQL Server. This can be obtained with SERVERPROPERTY('ProductVersion')
+	Function GetProductVersionPart {
+		param($VersionText,$Position = 1)
+		
+		
+		$FirstMatchCount = $Position - 1;
+		
+		#The logic is simple: Match the string NNN.NNN.NNN.NNN 
+		#The first parentheses, matchs first pairs "NNNN." The amount of matches depends of $FirstMatchCount
+		#Next parenthesis matchs our deserided part, because previous expressions already matchs that parts that we not want.
+			#This is because we can decrement position. If we want first part, then the first expression must match 0 for next catch correct part. 
+		$m = [regex]::Match($VersionText,"^(\d+\.){$FirstMatchCount}(\d+).*$");
+
+		#The match results will contains thee groups: The first is entire string, the second is last match of {count}. The next have our data. It is os offset 2 of array.
+		$part = $m.Groups[2].Value;
+		
+		if($part){
+			return ($part -as [int])
+		} else {
+			return $null;
+		}
+		
+		
+	}
+
+	#https://msdn.microsoft.com/en-us/library/ms143694.aspx
+	Function GetProductVersionNumeric {
+		param($Version1,$Parts = 3)
+
+		$Major1 = GetProductVersionPart $Version1 1
+		$Minor1 = GetProductVersionPart $Version1 2
+		$Build1 = GetProductVersionPart $Version1 3
+		$Revision1 = GetProductVersionPart $Version1 4
+		
+		
+		return $Major1 + ($Minor1*0.01) + ($Build1*0.000001) + ($Revision1*0.00000001);
+	}
+
+
 
 #Validate log file!
 if(!$SetupLogFile){
 	$SetupLogFile = ".\InstallSQLServer-$InstanceName.log"
 }
 
-#Valiate setup executable!
+#Validate setup executable!
 	if(!$Setup){
 		$SetupRoot = "."
 		$Setup = ".\setup.exe"
 	} elseif( (Get-Item $Setup -EA "SilentlyContinue").PSIsContainer ){
-		$SetupRoot = $Setup;
+		$SetupRoot 	= $Setup;		
 		$Setup = $Setup +"\setup.exe";
+	} else {
+		$IsoSetup  			= Get-Variable Cached_IsoSetup -ValueOnly -EA "SilentlyContinue" -Scope 1;
+		$OriginalSetup  	= Get-Variable Cached_OriginalIsoSetup -ValueOnly -EA "SilentlyContinue" -Scope 1;
+		
+		if($Setup -and $Setup -ne $OriginalSetup){
+			write-warning "New setup was specified: $Setup (Currently Cached: $OriginalSetup)"
+		}elseif($IsoSetup -and (Test-Path $IsoSetup)){
+			write-warning "Using previous mounted ISO: $IsoSetup (ISO: $OriginalSetup)";
+			$Setup = $IsoSetup
+		}
+		
+		if($Setup -like '*.iso'){
+			#Check if already mounted this path!
+			$MountedImages = Get-Volume | Get-DiskImage;
+			$CurrentMount = $MountedImages | ? { $_.ImagePath -eq $Setup } | select -first 1; 
+			
+			
+			if($CurrentMount){
+				$Mounted = $CurrentMount
+			} else {
+				write-warning "Mounting setup from ISO $Setup...";
+				$Mounted = Mount-DiskImage $Setup -Passthru;
+			}
+			
+		
+			if($Mounted){
+				$MountLetter = ($Mounted | Get-Volume).DriveLetter;
+				write-warning "	Mounted to letter $MountLetter...";
+				
+				if(!$MountLetter){
+					throw "INVALID_MOUNT_LETTER: ISO was mounted but not letter was found! Mount manually and use -Setup"
+				}
+				
+				Set-Variable -Scope 1 -Name Cached_OriginalIsoSetup -Value $Setup
+				$Setup = "$MountLetter" + ":\setup.exe";
+				Set-Variable -Scope 1 -Name Cached_IsoSetup -Value $Setup
+				
+			} else {
+				throw "INVALID_MOUNTED: Iso cannot be mounted $Setup"
+			}
+			
+		}
 	}
 
 
@@ -377,13 +557,27 @@ if(!$SetupLogFile){
 		throw "INVALID_SETUP: Use -Setup Parameter or MSSQL_SETUP_FOLDER environemnt variable to specify a location of setup!. Current setup: $Setup"
 	}
 
-
+	
+	#Getting setup version.
+	#We use this to infere sql server versiion!
+	$ProductVersionText = (get-item $Setup).VersionInfo.ProductVersion;
+	$ProductVersion		= GetProductVersionNumeric $ProductVersionText
+	$MajorVersion		= GetProductVersionPart $ProductVersionText 1 
+	$MinorVersion		= GetProductVersionPart $ProductVersionText 2 
+	$ProductVersionTag	= ('' + $MajorVersion + $MinorVersion).substring(0,3);
+	
+	write-host "Setup Product Version is $ProductVersionText. NumericVersion: $ProductVersion";
+	
 #Credentials cache...
 	if($ResetCachedCredentials){
 		Set-Variable -Scope 1 -Name Cached_SAPassword_Install -Value $null
 		Set-Variable -Scope 1 -Name Cached_SQLServiceAccount_Install -Value $null
 	}
 
+
+#Validate features...
+
+$Features = $Features + $AddFeatures |  ? {  $ExcludeFeatures -NotContains $_   } | select -unique
 
 
 #Switch action based on parameters!
@@ -447,6 +641,7 @@ $Params.GetEnumerator() | %{
 
 $ParamsString = $CLIParams -Join " "
 
+write-host "Using setup file from $Setup";
 $SetupCall = [scriptblock]::create("$Setup $ParamsString");
 
 
@@ -465,32 +660,118 @@ if($Execute){
 		RedirectStandardOutput  = $SetupLogFile
 	}
 	
+	$StartTime = Get-Date;
 	$SetupProcess = Start-Process @StartProcessParams -PassThru -NoNewWindow
 	$SetupPid = $SetupProcess.Id;
 	
-	write-host "Setup initiated... Pid:$SetupPid LogFile: $SetupLogFile";
-	write-host "Waiting finish..."
+	write-host "Setup initiated... StartTime:$StartTime Pid:$SetupPid LogFile: $SetupLogFile";
 	
+	
+	if($ProductVersionTag -eq '105'){
+		$SetupLogDir = '100'
+	} else {
+		$SetupLogDir = $ProductVersionTag
+	}
+	
+	
+	$SetupLogs 	= $Env:ProgramFiles+"\Microsoft SQL Server\$SetupLogDir\Setup Bootstrap\Log"
+	
+	#Waiting setup lo folder be created...
+	write-progress -Activity "Installing SQL Server $InstanceName ($ProductVersionText)" -Status 'Waiting creation of setup log folder...';
+	$WaitLogFolderStart = Get-date;
+	while($true){
+		$SetupLogFolders = gci $SetupLogs -EA "SilentlyContinue" | ? { $_.CreationTime -ge $StartTime };
+	
+		if($SetupLogFolders){
+			write-host "	Setup log folders after start of setup (started at $StartTime)"
+			$SetupLogFolders  | %{
+				write-host ("	"+$_.FullName)
+				write-host 	("		Created at: "+$_.CreationTime)
+			}
+			
+			if($SetupLogFolders.count -gt 1){
+				write-warning 'More than one setup log folder after setup initiated... There are somee other install running parallel?'
+			} else {
+				$DetailedSetupLogFolder = @($SetupLogFolders)[0].FullName;
+			}
+			
+			break;
+		}
+	
+	
+		$ElapsedWaitTime = (get-date) - $WaitLogFolderStart;
+		
+		if($ElapsedWaitTime.TotalSeconds -gt 60){
+			write-warning 'Timeout expired waiting setup log folder at $SetupLogs. Check if all right is ok. We will stop waiting setup log folder...'
+			break;
+		}
+	
+		Start-Sleep -s 2;
+	}
+	
+	
+	write-host "Waiting setup finish... Detailed log folder is: $DetailedSetupLogFolder"
 	$SetupRuning = $true;
 	while($SetupRuning){
 		try {
-			 $SetupProcess | Wait-Process -Timeout 1
+			 $SetupProcess | Wait-Process -Timeout 2
 			 $SetupRuning = $false;
 		} catch [System.TimeoutException] {
 			#Do some useful thing
 			$Actions = Get-Content $SetupLogFile | ?{ $_ -match '^Running Action:(.+)' } | %{ $matches[1] };
 			if($Actions){
-				write-progress -Activity "Installing SQL Server" -Status $Actions[-1];
+				write-progress -Activity "Installing SQL Server $InstanceName ($ProductVersionText)" -Status $Actions[-1];
 			}
 			
 		}
 	}
 	
+	#Setup exit codes (msi exit codes)
+	#https://docs.microsoft.com/en-us/windows/win32/msi/error-codes
+	$ERROR_SUCCESS 					= 0
+	$ERROR_SUCCESS_REBOOT_INITIATED = 1641
+	$ERROR_SUCCESS_REBOOT_REQUIRED 	= 3010
+	$SUCCESS_EXITS				= @(
+				$ERROR_SUCCESS
+				$ERROR_SUCCESS_REBOOT_INITIATED
+				$ERROR_SUCCESS_REBOOT_REQUIRED
+			)
+	
+	
 	$ExitCode = $SetupProcess.ExitCode;
-	if($ExitCode -eq 0){
+	if($SUCCESS_EXITS -Contains $ExitCode){
 		write-host -ForegroundColor Green -BackgroundColor White "INSTALLATION SUCCESSFULLY";
+		
+		if($ExitCode -eq $ERROR_SUCCESS_REBOOT_INITIATED){
+			write-warning "A reboot was initiated!";
+		}
+		
+		if($ExitCode -eq $ERROR_SUCCESS_REBOOT_REQUIRED){
+			write-warning "A reboot was required!";
+		}
+		
 	} else {
-		write-host -ForegroundColor Red "Install FAIL!... Reading error from errorlog...";
+		write-host "Trying get updated last action...";
+		$Actions = @(Get-Content $SetupLogFile | ?{ $_ -match '^Running Action:(.+)' } | %{ $matches[1] });
+		
+		if($Actions){
+			$LastAction = $Actions[-1];
+		}
+		
+		write-host -ForegroundColor Red "Install FAIL!... Reading error from errorlog... LastAction: $LastAction";
+		
+		if($DetailedSetupLogFolder){
+			write-host "You also can check setup log folder at $DetailedSetupLogFolder";
+			
+			if($LastAction){
+				write-host "Check this possible errorlog to determine causes"
+				$Filter = $LastAction.replace('install_','');
+				gci $DetailedSetupLogFolder | ?{ $_.name -like "*$Filter*" -or $_.name -eq 'Detail.txt' -or $_.name -like 'Summary*' }  | %{
+					write-host ("	"+$_.FullName)
+				}
+			}
+		}
+		
 
 		$FullErrorMsg = @();
 		$ErrorPartFound = $false;
@@ -529,6 +810,11 @@ if($Execute){
 		$FinalError = $FullErrorMsg -Join "`r`n";
 		
 		throw $FinalError;
+	}
+	
+	if($OriginalSetup){
+		write-warning "Unmounting iso...";
+		$dismounted = Dismount-DiskImage -ImagePath $OriginalSetup;
 	}
 	
 } else {
