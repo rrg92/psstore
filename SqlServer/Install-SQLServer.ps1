@@ -200,18 +200,25 @@ param(
 		#Defaults to Install!
 		#Valid actions must be found on documentation.
 		#This script can not support all available actions!
-		[ValidateSet("Install","Uninstall","RebuildDatabase")]
+		#The difference between Patch and Upgrade is that Patch expects $Setup be a donwloaded package.
+		#	Paramrters comes from here: https://docs.microsoft.com/en-us/sql/database-engine/install-windows/installing-updates-from-the-command-prompt?view=sql-server-ver15#supported-parameters
+		#	Upgrade value expects be setup.exe extracted from upgrade patch.
+		[ValidateSet("Install","Uninstall","RebuildDatabase","Upgrade","Patch","Sysprep")]
 		$Action = "Install"
 		
 	,#Force installation of developer edition (useful when using a media containing other editions, like evaluation)
 	 #In order to this works, $ProductKey parameter must be empty
 		[switch]$DeveloperEdition
+		
+	,#Ignore version check in upgrade/patch actions... 
+		[switch]$IgnoreUpgradeVersionCheck
 )
 
 #Source reference: https://msdn.microsoft.com/en-us/library/ms144259.aspx?f=255&MSPPError=-2147217396
 
 $ErrorActionPreference="Stop"
-
+$SCRIPT_VERSION = "1.1.0"
+$DEFAULT_SERVER_COLLATION = "Latin1_General_CI_AI";
 
 	function ResolvePath {
 		param($path)
@@ -223,7 +230,6 @@ $ErrorActionPreference="Stop"
 	
 		$Params = @{
 			ACTION 							= "Install"
-			IACCEPTSQLSERVERLICENSETERMS 	= $null
 			ERRORREPORTING 					= $false
 			FEATURES 						= $Features
 			INDICATEPROGRESS 				= $null
@@ -237,13 +243,24 @@ $ErrorActionPreference="Stop"
 			$Params.UpdateEnabled = $false;
 		}
 		
-		
-		#Validate collation!
-		if(!$ServerCollation -and !$UseDefaultCollation){
-			throw "Must specify -ServerCollation. If you want use Latin1_General_CI_AI specify -UseDefaultCollation"
+		if($ProductVersion -ge 10.5){
+			$Params['IACCEPTSQLSERVERLICENSETERMS'] 	= $null
 		}
 		
 		
+		#Validate collation!
+		if(!$ServerCollation){
+			if($UseDefaultCollation){
+				$Params.SQLCOLLATION = $DEFAULT_SERVER_COLLATION
+			} else {
+				throw "Must specify -ServerCollation. If you want use $DEFAULT_SERVER_COLLATION specify -UseDefaultCollation"
+			}
+		}
+		
+		if($ServerCollation -eq 'auto'){
+			$Params.remove('SQLCOLLATION')
+		}
+
 		#Validate product key and edition!
 		if($DeveloperEdition -and $ProductKey){
 			
@@ -439,6 +456,7 @@ $ErrorActionPreference="Stop"
 			SQLCOLLATION					= $ServerCollation
 			SAPWD							= $SACredentials.GetNetworkCredential().Password
 		}
+		
 
 		if($AddCurrentAsAdmin){
 			$Params.add("SQLSYSADMINACCOUNTS", [System.Security.Principal.WindowsIdentity]::GetCurrent().Name)
@@ -458,6 +476,116 @@ $ErrorActionPreference="Stop"
 		}
 
 		return $Params;
+	}
+
+	#Updagrades the sql server from setup.exe...
+	function ActionUpgrade {
+		param($SetupParams)
+		
+		$Params = @{
+			ACTION 							= "Upgrade"
+			IACCEPTSQLSERVERLICENSETERMS 	= $null
+			INSTANCENAME					= $InstanceName
+			INSTANCEID						= $null
+		}
+		
+		#Get instance id...
+		$InstanceInfo = @(GetInstancesInfo -InstanceName $InstanceName);
+		
+		if(!$InstanceInfo){
+			throw "INSTANCE_NOT_FOUND: $InstanceInfo";
+		}
+		
+		$InstanceId = $InstanceInfo[0].InstanceId;
+		
+		if(!$InstanceId){
+			throw "INSTANCE_ID_PRESENT"
+		}
+		
+		$Params.INSTANCEID = $InstanceId;
+		
+		CheckUpgradeVersion $InstanceInfo
+		
+		
+		return $Params;
+	}
+
+	#Upgrades from a msi package...
+	function ActionPatch {
+		param($SetupParams)
+		
+		$Params = @{
+			action 							= "Patch"
+			IAcceptSQLServerLicenseTerms 	= $null
+			instancename					= $InstanceName
+			InstanceID						= $null
+			quiet							= $true
+		}
+		
+		#Get instance id...
+		$InstanceInfo = @(GetInstancesInfo -InstanceName $InstanceName);
+		
+		if(!$InstanceInfo){
+			throw "INSTANCE_NOT_FOUND: $InstanceInfo";
+		}
+		
+		$InstanceId = $InstanceInfo[0].InstanceId;
+		
+		if(!$InstanceId){
+			throw "INSTANCE_ID_PRESENT"
+		}
+		
+		$Params.InstanceID = $InstanceName;
+		
+		CheckUpgradeVersion $InstanceInfo
+		
+		return $Params;	
+	}
+
+	#Sysprep installation...
+	function ActionSysPrep {
+		param($SetupParams)
+	
+		$Params = @{
+			ACTION 							= "PrepareImage"
+			IACCEPTSQLSERVERLICENSETERMS 	= $null
+			FEATURES 						= $Features
+			INDICATEPROGRESS 				= $null
+			INSTANCEID						= $InstanceName
+		}	
+
+		if($ProductVersion -ge 11){
+			$Params.UpdateEnabled = $false;
+		}
+
+		if($SkipRules){
+			$Params["SkipRules"] = $SkipRules -Join " ";
+		}
+
+
+		if($InstanceDir){
+			$Params.add("INSTANCEDIR", $InstanceDir)
+		}
+		
+		return $Params;
+	}
+
+
+	function CheckUpgradeVersion {
+		param($InstanceInfo)
+		
+		if($IgnoreUpgradeVersionCheck){
+			write-warning "Ignoring updrade version check... Just for info: CurrentVersion:$($InstanceInfo.Version) SetupVersion:$ProductVersionText"
+			return;
+		}
+		
+		$CurrentNumericVersion = $InstanceInfo.VersionNumeric
+		$SetupNumericVersion	 = $ProductVersion
+		
+		if($CurrentNumericVersion -ge $SetupNumericVersion){
+			throw "UPGRADE_SETUP_OLD: CurrentVersion:$($InstanceInfo.Version) (Numeric:$CurrentNumericVersion) | SetupVersion:$ProductVersionText (Numeric = $SetupNumericVersion)"
+		}
+		 return;
 	}
 
 	#Get specific version number from a Product version string from SQL Server. This can be obtained with SERVERPROPERTY('ProductVersion')
@@ -498,11 +626,75 @@ $ErrorActionPreference="Stop"
 		return $Major1 + ($Minor1*0.01) + ($Build1*0.000001) + ($Revision1*0.00000001);
 	}
 
+	#get installed instances info...
+	Function GetInstancesInfo {
+		[CmdletBinding()]
+		param([string[]]$InstanceName = @())
 
+		$defaultProperties = "PSPath","PSPArentPath","PSChildName","PSDrive","PSProvider"
+		$Path = "HKLM:\SOFTWARE\Microsoft\Microsoft SQL Server\Instance Names\SQL"
+		$SqlBaseRegKey = 'HKLM:\SOFTWARE\Microsoft\Microsoft Sql Server'
+		 
+		if(!$InstanceName){
+			if(Test-Path $SqlBaseRegKey){
+				$InstanceName = @((Get-ItemProperty $SqlBaseRegKey).InstalledInstances)
+			} else {
+				return $null;
+			}
+		}
+		 
+		$AllInstanceRegKey = Get-ItemProperty -Path $Path;
+		$AllInstances = @()
+		$VersionPathKey = 'HKLM:\SOFTWARE\Microsoft\Microsoft SQL Server\{0}\MSSQLServer\CurrentVersion'
+
+		foreach($InstName in $InstanceName){
+			$InstanceId = $AllInstanceRegKey.$InstName;
+			$InstanceInfo = New-Object PsObject -Prop @{
+									InstanceName 	= $InstName
+									InstanceId		= $InstanceId
+									Version			= $null
+									VersionNumeric	= $null
+									VersionMajor	= $null
+									VersionMinor	= $null
+								}
+								
+			$AllInstances += $InstanceInfo;
+								
+			#Try get version...
+			try {
+				$InstanceVersionKey = $VersionPathKey -f $InstanceInfo.InstanceId
+				$InstanceInfo.Version = (Get-ItemProperty -Path $InstanceVersionKey -Name "CurrentVersion").CurrentVersion
+				
+				$ProductVersion		= GetProductVersionNumeric $InstanceInfo.Version
+				$MajorVersion		= GetProductVersionPart $InstanceInfo.Version 1 
+				$MinorVersion		= GetProductVersionPart $InstanceInfo.Version 2 
+				
+				$InstanceInfo.VersionNumeric = $ProductVersion
+				$InstanceInfo.VersionMajor = $MajorVersion
+				$InstanceInfo.VersionMinor = $MinorVersion
+			} catch {
+				write-host "Failed get version of instance: $InstanceName(Id: $($InstanceInfo.InstanceId))";
+			}
+		}
+
+		return $AllInstances
+	}
+	
+	#CHeck if current users is administrator.
+	function IsAdmin {
+		#thanks to https://serverfault.com/questions/95431/in-a-powershell-script-how-can-i-check-if-im-running-with-administrator-privil
+		$currentPrincipal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
+		$currentPrincipal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+	}
 
 #Validate log file!
 if(!$SetupLogFile){
 	$SetupLogFile = ".\InstallSQLServer-$InstanceName.log"
+}
+
+#Validate admin
+if(-not(IsAdmin)){
+	throw "Must run as Administrator";
 }
 
 #Validate setup executable!
@@ -587,22 +779,49 @@ $Features = $Features + $AddFeatures |  ? {  $ExcludeFeatures -NotContains $_   
 #Switch action based on parameters!
 switch($Action){
 	"Install" {
+		$ActivityAction= "Installing";
 		$Params = ActionInstall $Params;
 	}
 	
 	"RebuildDatabase" {
+		$ActivityAction = "Rebuilding database"
 		$Params = ActionRebuildDatabase $Params;
 	}
 	
 	"Uninstall" {
+		$ActivityAction = "Uninstalling"
 		$Params = ActionUninstall $Params;
 	}
+	
+	"Upgrade" {
+		$ActivityAction = "Upgrading";
+		$FileName = Split-Path -Leaf $Setup
+		
+		if($FileName -ne 'setup.exe'){
+			throw "Upgrade must use setup.exe. Setup seems a patch? Use Patch -Action value instead."
+		}
+		
+		$Params = ActionUpgrade $Params
+	}
+	
+	"Patch" {
+		$ActivityAction = "Patching"
+		$Params = ActionPatch $Params
+	}
+	
+	"Sysprep" {
+		$ActivityAction = "Sysprep(ing)"
+		$Params = ActionSysPrep $Params
+	}
+	
 	
 	
 	default {
 		throw "ACTION_NOTSUPPORTED: $Action";
 	}	
 }
+
+$ActivityText = "$ActivityAction SQL Server $InstanceName ($ProductVersionText)"
 
 #Set mandatory parameters action-indepenent
 	$Params += @{
@@ -681,7 +900,7 @@ if($Execute){
 	$SetupLogs 	= $Env:ProgramFiles+"\Microsoft SQL Server\$SetupLogDir\Setup Bootstrap\Log"
 	
 	#Waiting setup lo folder be created...
-	write-progress -Activity "Installing SQL Server $InstanceName ($ProductVersionText)" -Status 'Waiting creation of setup log folder...';
+	write-progress -Activity $ActivityText -Status 'Waiting creation of setup log folder...';
 	$WaitLogFolderStart = Get-date;
 	while($true){
 		$SetupLogFolders = gci $SetupLogs -EA "SilentlyContinue" | ? { $_.CreationTime -ge $StartTime };
@@ -713,18 +932,48 @@ if($Execute){
 		Start-Sleep -s 2;
 	}
 	
+	#Details...
+	$IsDetailedLog = $false;
+	$PoolInstanceLog = $false;
+	if($Action -in ('Patch','Upgrade')){
+		$AlternateSetupLog = $DetailedSetupLogFolder+'\Detail.txt';
+		
+		if(Test-Path $AlternateSetupLog){
+			$SetupLogFile = $AlternateSetupLog;
+			$IsDetailedLog = $true;
+			write-warning "SetupLog file changed to $SetupLogFile";
+			$PoolInstanceLog = $true;
+		}
+		
+	}
+	
+	$InstanceSetupLog = $DetailedSetupLogFolder+'\'+$InstanceName+'\Detail.txt';
 	
 	write-host "Waiting setup finish... Detailed log folder is: $DetailedSetupLogFolder"
 	$SetupRuning = $true;
+	$UsingInstanceSetupLog = $false;
 	while($SetupRuning){
 		try {
 			 $SetupProcess | Wait-Process -Timeout 2
 			 $SetupRuning = $false;
 		} catch [System.TimeoutException] {
+			
+			#Get detail of specific instance...
+			if($PoolInstanceLog -and !$UsingInstanceSetupLog){
+				
+				#Path exist?
+				if(Test-Path $InstanceSetupLog){
+					$UsingInstanceSetupLog = $true;
+					write-warning "Instance setup log detected. SetupLogFile changed to $InstanceSetupLog"
+					$SetupLogFile = $InstanceSetupLog;
+				}
+			}
+			
+			
 			#Do some useful thing
-			$Actions = Get-Content $SetupLogFile | ?{ $_ -match '^Running Action:(.+)' } | %{ $matches[1] };
+			$Actions = Get-Content $SetupLogFile | ?{ $_ -match 'Running Action:(.+)' } | %{ $matches[1] };
 			if($Actions){
-				write-progress -Activity "Installing SQL Server $InstanceName ($ProductVersionText)" -Status $Actions[-1];
+				write-progress -Activity $ActivityText -Status $Actions[-1];
 			}
 			
 		}
@@ -756,7 +1005,7 @@ if($Execute){
 		
 	} else {
 		write-host "Trying get updated last action...";
-		$Actions = @(Get-Content $SetupLogFile | ?{ $_ -match '^Running Action:(.+)' } | %{ $matches[1] });
+		$Actions = @(Get-Content $SetupLogFile | ?{ $_ -match 'Running Action:(.+)' } | %{ $matches[1] });
 		
 		if($Actions){
 			$LastAction = $Actions[-1];
@@ -778,31 +1027,36 @@ if($Execute){
 		
 
 		$FullErrorMsg = @();
-		$ErrorPartFound = $false;
+		$InsideError = $false;
 		$AllErrorLog = Get-Content $SetupLogFile;
-		$l = -1;
-		while($true -and $l -le $AllErrorLog.count){
-			$l++;
+		$l = $AllErrorLog.count;
+		while($l--){
 			$Line = $AllErrorLog[$l];
 			
-			if($ErrorPartFound){
-				$FullErrorMsg += $Line;
-								 
-				if($Line -eq 'Please review the summary.txt log for further details'){
+			#If is within error...
+			if($InsideError){
+				$FullErrorMsg += $Line -replace '^\([^\(]+\) \d\d\d\d\-\d\d\-\d\d \d\d\:\d\d\:\d\d \w+\:','';
+								
+				if($Line -match $EndOfSearchMark){
 					break;
 				}
 				
 				continue;
 			}
 			
-			if($Line -eq 'The following error occurred:'){
-				$ErrorPartFound = $true;
+			
+			if($Line -match 'Result error code: .+' ){
+				$InsideError = $true;
+				$EndOfSearchMark = 'Exception type: .+';
 				continue;
 			}
-			
 		}
 		
-		if(!$FullErrorMsg){
+		$null = [array]::reverse($FullErrorMsg);
+		
+		if(!$AllErrorLog){
+			$FullErrorMsg += "Setup log $SetupLogFile not generated output..."
+		} elseif(!$FullErrorMsg){
 			$FullErrorMsg += "Maybe, process was killed!"
 		}
 		
@@ -813,7 +1067,8 @@ if($Execute){
 		$FullErrorMsg += "INSTALL FAIL: $ExitCode. Check errorlog!";
 		$FinalError = $FullErrorMsg -Join "`r`n";
 		
-		throw $FinalError;
+
+		write-error $FinalError;
 	}
 	
 	if($OriginalSetup){
