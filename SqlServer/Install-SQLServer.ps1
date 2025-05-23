@@ -66,6 +66,12 @@ param(
 	#In every case, you must donwload the ISO
 	#The default is use from the environment variable MSSQL_SETUP_FOLDER
 		$Setup = $Env:MSSQL_SETUP_FOLDER
+		
+		
+	,#Installer map file.
+     #This is powershell returning hashtable containing location of setup files!
+	 #When Setup is a version number, it uses this file to check if have a path to specific version of installer!
+		$SetupMap = $Env:MSSQL_SETUP_MAP
 	
 	,#Execute the install!
 		#By default, script just print parameters and other informations.
@@ -99,6 +105,7 @@ param(
 		$SetupLogFile = $null
 	
 	,#Specify the product key 
+		[Alias("PID","PK")]
 		$ProductKey = $null
 	
 	,#Tell to script attempt to load product key from ini file on installation directory 
@@ -200,7 +207,7 @@ param(
 		#Defaults to Install!
 		#Valid actions must be found on documentation.
 		#This script can not support all available actions!
-		#The difference between Patch and Upgrade is that Patch expects $Setup be a donwloaded package.
+		#The difference between Patch and Upgrade is that Patch expects $Setup be a donwloaded package (.exe donwload from update)
 		#	Paramrters comes from here: https://docs.microsoft.com/en-us/sql/database-engine/install-windows/installing-updates-from-the-command-prompt?view=sql-server-ver15#supported-parameters
 		#	Upgrade value expects be setup.exe extracted from upgrade patch.
 		[ValidateSet("Install","Uninstall","RebuildDatabase","Upgrade","Patch","Sysprep")]
@@ -262,14 +269,38 @@ $DEFAULT_SERVER_COLLATION = "Latin1_General_CI_AI";
 		}
 
 		#Validate product key and edition!
-		if($DeveloperEdition -and $ProductKey){
-			
-			if($ProductKey){
-				throw "INVALID_EDITION_OR_PID: Specify -DeveloperEdition or -ProductKey, never both"
+		if($DeveloperEdition -and !$ProductKey){
+			$ProductKey = "Developer";
+			$DeveloperEdition = $null;
+		}
+		
+		switch($ProductKey){
+			# Como encontrei as producs keys?
+			# Na pasta de log do instalador tem um rquivo settings.xml que contém!
+			# PRocurar por FREEEDITIONS
+			# Com base no fato que uso isso desde versoes antigas, entendo que nao muda!
+			# Mas, se mudar, teria que fazer um if ou criar uma tabelinha pra cada versao!
+						
+			{$_-in "Dev","Developer"} {
+				$ProductKey = '22222-00000-00000-00000-00000';
 			}
 			
-			#thanks to https://blog.aelterman.com/2017/08/12/silent-installation-of-sql-server-2016-or-2017-developer-edition-from-evaluation-installation-media/
-			$ProductKey = '22222-00000-00000-00000-00000';
+			{$_ -in "StdDev","StandardDeveloper","Std","Standard"} {
+				$ProductKey = '33333-00000-00000-00000-00000';
+			}
+			
+			# novo no 2025
+			{$_ -in "StdDev","StandardDeveloper","Std","Standard"} {
+				$ProductKey = '11111-00000-00000-00000-00000';
+			}
+			
+			{$_ -in "Eval","Evaluation"} {
+				$ProductKey = $null
+			}
+		}
+		
+		if($DeveloperEdition -and $ProductKey){
+			throw "INVALID_EDITION_OR_PID: Specify -DeveloperEdition or -ProductKey, never both"
 		}
 		
 
@@ -522,6 +553,10 @@ $DEFAULT_SERVER_COLLATION = "Latin1_General_CI_AI";
 			quiet							= $true
 		}
 		
+		if($SkipRules){
+			$Params["SkipRules"] = $SkipRules -Join " ";
+		}
+		
 		#Get instance id...
 		$InstanceInfo = @(GetInstancesInfo -InstanceName $InstanceName);
 		
@@ -697,6 +732,8 @@ if(-not(IsAdmin)){
 	throw "Must run as Administrator";
 }
 
+$TargetSetupVersion  = $null;
+
 #Validate setup executable!
 	if(!$Setup){
 		$SetupRoot = "."
@@ -746,6 +783,39 @@ if(-not(IsAdmin)){
 			}
 			
 		}
+		
+		
+		if($Setup -match '^\d+\.'){
+			$SetupVersion = $SetupVersion;
+			
+			if(!$SetupMap -and (Test-Path ".\SetupMap.ps1")){
+				write-warning "Using setup map of current folder";
+				$SetupMap = Resolve-Path ".\SetupMap.ps1"
+			}
+			
+			if(-not(Test-path $SetupMap)){
+				throw "MSSQL_SETUP_NOMAPFILE: Setup map not found $SetupMap"
+			}
+			
+			
+			#Is Verson setup!
+			write-host "Loading setup map $SetupMap";
+			$MapContent = & $SetupMap
+			
+			#Find the version!
+			$TargetSetupVersion = $Setup.trim();
+			
+			$Setup = $MapContent.$Setup;
+			
+			write-warning "Setup got from SetupMap: $Setup";
+			
+			if(!$Setup -or -not(Test-Path $Setup)){
+				throw "NO_SETUP_MAP: Version $TargetSetupVersion not found in map $SetupMap";
+			}
+			
+		
+			
+		}
 	}
 
 
@@ -763,6 +833,10 @@ if(-not(IsAdmin)){
 	$ProductVersionTag	= ('' + $MajorVersion + $MinorVersion).substring(0,3);
 	
 	write-host "Setup Product Version is $ProductVersionText. NumericVersion: $ProductVersion";
+	
+	if($TargetSetupVersion -and $TargetSetupVersion -ne $ProductVersionText){
+		throw "INVALID_SETUP_VERSION: Setup is $ProductVersionText and target is $TargetSetupVersion"
+	}
 	
 #Credentials cache...
 	if($ResetCachedCredentials){
@@ -935,7 +1009,7 @@ if($Execute){
 	#Details...
 	$IsDetailedLog = $false;
 	$PoolInstanceLog = $false;
-	if($Action -in ('Patch','Upgrade')){
+	if($Action -in ('Install','Patch','Upgrade')){
 		$AlternateSetupLog = $DetailedSetupLogFolder+'\Detail.txt';
 		
 		if(Test-Path $AlternateSetupLog){
